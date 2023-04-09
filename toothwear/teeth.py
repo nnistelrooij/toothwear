@@ -44,10 +44,34 @@ class DentalMesh:
         labels: Optional[NDArray[np.int64]]=None,
         reference: bool=True,
     ) -> None:
-        self.vertices = vertices
-        self.triangles = triangles
-        self.normals = normals / np.linalg.norm(normals, axis=-1, keepdims=True)
-        self.labels = labels
+        # remove unreferenced vertices
+        triangles = triangles.astype(np.int64)
+        vertex_idxs = np.unique(triangles)
+        vertex_mask = np.zeros(vertices.shape[0], dtype=bool)
+        vertex_mask[vertex_idxs] = True
+        vertices = vertices[vertex_mask]
+
+        # normalize normals
+        normals = normals[vertex_mask]
+        norms = np.linalg.norm(normals, axis=-1)
+        normals[norms > 0] /= norms[norms > 0, np.newaxis]
+
+        # realign vertex indices
+        vertex_map = np.cumsum(vertex_mask) - 1
+        triangles = vertex_map[triangles]
+
+        # set default labels
+        if labels is None:
+            labels = np.zeros(vertices.shape[0], dtype=int)
+        else:
+            labels = labels[vertex_mask]
+
+            
+
+        self.vertices = vertices.astype(np.float32)
+        self.triangles = triangles.astype(np.int64)
+        self.normals = normals.astype(np.float32)
+        self.labels = labels.astype(np.int64)
         self.reference = reference
 
     @classmethod
@@ -68,6 +92,8 @@ class DentalMesh:
     ) -> open3d.geometry.TriangleMesh:
         ms = pymeshlab.MeshSet()
         ms.load_new_mesh(str(mesh_file))
+        ms.meshing_repair_non_manifold_edges()
+        ms.meshing_close_holes(maxholesize=130)
         
         mesh = ms.current_mesh()
         vertices = mesh.vertex_matrix()
@@ -185,33 +211,174 @@ class DentalMesh:
 
         return self[mask]
     
-    def signed_distances(
+    def _ray_triangle_intersections(
+        self,
+        scene: open3d.t.geometry.RaycastingScene,
+        allow_back_faces: bool=False,
+        max_dist: Optional[float]=2.0,
+    ) -> NDArray[np.float32]:
+        rays = np.stack((
+            np.column_stack((self.vertices, self.normals)),
+            np.column_stack((self.vertices, -self.normals)),
+        ))
+        ray_dict = scene.cast_rays(rays)
+        ray_dict = {k: v.numpy() for k, v in ray_dict.items()}
+
+        if not allow_back_faces:
+            hit = np.isfinite(ray_dict['t_hit'])
+            signs = np.tile([[1], [-1]], reps=hit.shape[1])
+            normals = signs[..., None] * ray_dict['primitive_normals']
+            backward = np.einsum('ik,ik->i', normals[hit], rays[hit, 3:]) < 0
+            hit[hit] = ~backward
+            ray_dict['t_hit'][~hit] = np.inf
+
+        if max_dist is not None:
+            hit = np.isfinite(ray_dict['t_hit'])
+            hit[hit] = np.abs(ray_dict['t_hit'][hit]) < max_dist
+            ray_dict['t_hit'][~hit] = np.inf
+
+        signs = 1 - 2 * ray_dict['t_hit'].argmin(axis=0)
+        distances = ray_dict['t_hit'].min(axis=0)
+        
+        hit = np.isfinite(distances)[:, np.newaxis]
+        idx = ray_dict['t_hit'].argmin(axis=0), np.arange(hit.shape[0]), slice(None)
+        closest_points = {
+            'signed_distances': np.where(hit[:, 0], signs * distances, np.nan),
+            'primitive_normals': np.where(hit, ray_dict['primitive_normals'][idx], np.nan),
+            'primitive_uvs': np.where(hit, ray_dict['primitive_uvs'][idx], np.nan),
+            'primitive_ids': np.where(hit[:, 0], ray_dict['primitive_ids'][idx[:-1]], -1),
+            'geometry_ids': np.where(hit[:, 0], ray_dict['geometry_ids'][idx[:-1]], -1),
+        }
+
+        return closest_points
+    
+    def closest_points(
         self,
         test,
-        direction_thresh: float=0.5,
-    ) -> NDArray[np.float32]:
+        raycast: bool=False,
+    ) -> Dict[str, NDArray[Any]]:
         test = test.to_open3d_triangle_mesh()
         test = open3d.t.geometry.TriangleMesh.from_legacy(test)
 
         scene = open3d.t.geometry.RaycastingScene()
         scene.add_triangles(test)
 
-        query_points = self.vertices.astype(np.float32)
-        closest_points = scene.compute_closest_points(query_points)
+        if raycast:
+            ray_dict = self._ray_triangle_intersections(scene)
+            signed_dists = ray_dict['signed_distances'][:, np.newaxis]
+            ray_dict['points'] = self.vertices + signed_dists * self.normals
 
-        test_points = closest_points['points'].numpy()
+            return ray_dict
+
+        closest_points = scene.compute_closest_points(self.vertices)
+        closest_points = {k: v.numpy() for k, v in closest_points.items()}
+
+        test_points = closest_points['points']
         vectors = test_points - self.vertices
-        distances = np.sqrt(np.sum(vectors ** 2, axis=-1))
+        distances = np.linalg.norm(vectors, axis=-1)
 
-        vectors /= np.linalg.norm(vectors, axis=-1, keepdims=True)
-        test_normals = closest_points['primitive_normals'].numpy()
-        directions = np.einsum('ik,ik->i', vectors, test_normals)
+        # determine sign of distance
+        directions = np.einsum('ik,ik->i', self.normals, vectors)
         signs = np.sign(directions)
+        closest_points['signed_distances'] = signs * distances
 
-        # make orthogonal measurements np.nan
-        distances[np.abs(directions) < direction_thresh] = np.nan
+        # make measurements for non-corresponding vertices np.nan
+        ray_dict = self._ray_triangle_intersections(scene)
+        nohit = np.isnan(ray_dict['signed_distances'])
+        nohit, _ = self._subsample_triangles(nohit)
 
-        return signs * distances
+        if not np.any(nohit):
+            return closest_points
+
+        crop = self[nohit]
+        clusters = crop.to_open3d_triangle_mesh().cluster_connected_triangles()
+        cluster_idxs = np.asarray(clusters[0])
+
+        is_border_vertex = self.border_mask(layers=1)
+        is_border_triangle = np.any(is_border_vertex[nohit][crop.triangles], -1)
+        is_border_cluster = np.zeros(cluster_idxs.max() + 1, dtype=bool)
+        for i in range(cluster_idxs.max() + 1):
+            is_border_cluster[i] = np.any(is_border_triangle[cluster_idxs == i])
+
+        border_triangles = crop.triangles[is_border_cluster[cluster_idxs]]
+        border_vertices = np.unique(border_triangles)
+        vertex_mask = np.zeros(crop.vertices.shape[0], dtype=bool)
+        vertex_mask[border_vertices] = True
+        nohit[nohit] = vertex_mask
+
+        closest_points['points'][nohit] = np.nan
+        closest_points['geometry_ids'][nohit] = -1
+        closest_points['primitive_ids'][nohit] = -1
+        closest_points['primitive_uvs'][nohit] = np.nan
+        closest_points['primitive_normals'][nohit] = np.nan
+        closest_points['signed_distances'][nohit] = np.nan
+
+        return closest_points        
+    
+    def signed_distances(
+        self,
+        test,
+    ) -> NDArray[np.float32]:
+        closest_points = self.closest_points(test)
+
+        return closest_points['signed_distances']
+    
+    def signed_volumes(
+        self,
+        test,
+        volume_thresh: float=0.2**3,
+        verbose: bool=False,
+    ) -> NDArray[np.float32]:
+        # determining corresponding poinst between self and test
+        closest_points = self.closest_points(test, raycast=False)
+        signs = np.sign(closest_points['signed_distances'])
+        intersections = closest_points['points']
+
+        vertices, triangles = [], []
+        volumes = np.zeros(0)
+        vertex_count = 0
+        for triangle in self.triangles:
+            # ignore triangles with no correspondence
+            if np.any(np.isnan(signs[triangle])):
+                volumes = np.concatenate((volumes, [np.nan]))
+                continue
+
+            # ignore intersecting triangles
+            if not (np.all(signs[triangle] == 1) or np.all(signs[triangle] == -1)):
+                volumes = np.concatenate((volumes, [0]))
+                continue
+
+            six_vertices = np.concatenate((
+                self.vertices[triangle],
+                intersections[triangle],
+            ))
+            pcd = open3d.geometry.PointCloud(
+                points=open3d.utility.Vector3dVector(six_vertices),
+            )
+            mesh, _ = pcd.compute_convex_hull()
+            volumes = np.concatenate((volumes, [mesh.get_volume()]))
+
+            if verbose:
+                vertices.append(np.asarray(mesh.vertices))
+                triangles.append(np.asarray(mesh.triangles) + vertex_count)
+                vertex_count += vertices[-1].shape[0]
+            
+        signs = signs[self.triangles][:, 0]
+        below_thresh_mask = np.isnan(volumes) | (volumes < volume_thresh)
+        signed_volumes = np.where(below_thresh_mask, signs * volumes, 0)
+
+        if verbose:
+            print(f'Triangle coverage: {(signed_volumes > 0).mean():.3f}')
+
+            mesh = open3d.geometry.TriangleMesh(
+                vertices=open3d.utility.Vector3dVector(np.concatenate(vertices)),
+                triangles=open3d.utility.Vector3iVector(np.concatenate(triangles)),
+            )
+            mesh = mesh.remove_duplicated_vertices()
+            mesh = mesh.compute_vertex_normals()
+            open3d.visualization.draw_geometries([mesh])
+        
+        return signed_volumes
     
     def crop_wrt_wear(
         self,
@@ -236,52 +403,60 @@ class DentalMesh:
 
         return self[mask]
     
-    def crop_wrt_border(
+    def border_mask(
         self,
         layers: int=2,
-        return_mask: bool=False,
-    ):
+    ) -> NDArray[np.bool_]:
         mask = np.ones(self.vertices.shape[0], dtype=bool)
         for _ in range(layers):
             edges = self[mask].edges
-            _, inverse, counts = np.unique(
-                edges, return_inverse=True, return_counts=True, axis=0,
-            )
-            border_edges_mask = counts[inverse] == 1
+            edges = np.sort(edges, axis=-1)
+            unique, counts = np.unique(edges, return_counts=True, axis=0)
+            border_vertex_idxs = np.unique(unique[counts == 1])
 
-            border_vertex_idxs = np.unique(edges[border_edges_mask])
             border_vertex_mask = np.zeros(mask.sum(), dtype=bool)
             border_vertex_mask[border_vertex_idxs] = True
 
-            mask[mask] = mask[mask] & ~border_vertex_mask
-            mask, _ = self._subsample_triangles(mask)
+            mask[mask] = ~border_vertex_mask
+            if layers > 1:
+                mask, _ = self._subsample_triangles(mask)
 
-        if return_mask:
-            return mask
-
-        return self[mask]
+        return ~mask
+    
+    def border_edges(
+        self,
+    ) -> NDArray[np.int64]:
+        edges = np.sort(self.edges, axis=-1)
+        _, index, counts = np.unique(
+            edges, return_index=True, return_counts=True, axis=0,
+        )
+        
+        return self.edges[index[counts == 1]]       
     
     def crop_components(
         self,
+        mask: Optional[NDArray[np.bool_]]=None,
         return_mask: bool=False,
     ) -> List[Any]:
         mesh = self.to_open3d_triangle_mesh()
-        cluster_idxs, counts, _ = mesh.cluster_connected_triangles()
+        cluster_idxs, _, _ = mesh.cluster_connected_triangles()
         cluster_idxs = np.asarray(cluster_idxs)
 
-        components, masks = [], []
-        for i in range(len(counts)):
+        components, component_masks = [], []
+        for i in range(cluster_idxs.max() + 1):
             triangles = self.triangles[cluster_idxs == i]
             vertex_idxs = np.unique(triangles)
-            mask = np.zeros(self.vertices.shape[0], dtype=bool)
-            mask[vertex_idxs] = True
-            mask, _ = self._subsample_triangles(mask)
+            component_mask = np.zeros(self.vertices.shape[0], dtype=bool)
+            component_mask[vertex_idxs] = True
+            component_mask, _ = self._subsample_triangles(component_mask)
+            if mask is not None:
+                component_mask[~mask] = False
             
-            masks.append(mask)
-            components.append(self[mask])
+            components.append(self[component_mask])
+            component_masks.append(component_mask)
 
         if return_mask:
-            return masks
+            return component_masks
             
         return components
     
@@ -318,7 +493,7 @@ class DentalMesh:
         mask, _ = self._subsample_triangles(mask)
 
         # remove 2 layers from the boundary
-        mask[mask] = self[mask].crop_wrt_border(return_mask=True)
+        mask[mask] = ~self[mask].border_mask()
         mask, _ = self._subsample_triangles(mask)
 
         # determine connected components
@@ -368,14 +543,14 @@ class DentalMesh:
         edges = np.concatenate((
             self.triangles[:, :2],
             self.triangles[:, 1:],
-            self.triangles[:, [0, 2]],
+            self.triangles[:, [2, 0]],
         ))
 
-        return np.sort(edges, axis=-1)
+        return edges
     
     @property
     def centroid(self) -> NDArray[np.float32]:
-        return self.vertices.mean(axis=0)
+        return self.vertices[self.labels > 0].mean(axis=0)
     
     @property
     def unique_labels(self) -> Set[int]:

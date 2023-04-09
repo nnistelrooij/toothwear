@@ -20,11 +20,16 @@ def procrustes(
     b = [c for l, c in test.centroids.items() if l in labels]
     result = rotational(a=np.stack(a), b=np.stack(b), translate=True)
 
-    T = np.eye(4)
-    T[:3, :3] = result.t.T
-    T[:3, 3] = test.centroid - reference.centroid
+    T1 = np.eye(4)
+    T1[:3, 3] = -np.mean(a, axis=0)
+
+    R = np.eye(4)
+    R[:3, :3] = result.t.T
+
+    T2 = np.eye(4)
+    T2[:3, 3] = np.mean(b, axis=0)
     
-    return T
+    return T2 @ R @ T1
 
 
 def ransac_icp(

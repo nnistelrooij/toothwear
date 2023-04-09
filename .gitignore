@@ -129,5 +129,4 @@ dmypy.json
 .pyre/
 
 # input data folder
-labels/
-OBJs/
+data/
