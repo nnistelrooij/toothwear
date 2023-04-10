@@ -114,6 +114,15 @@ class DentalMesh:
 
         return labels
     
+    def copy(self):
+        return DentalMesh(
+            self.vertices.copy(),
+            self.triangles.copy(),
+            self.normals.copy(),
+            self.labels.copy(),
+            self.reference,
+        )
+    
     def to_open3d_triangle_mesh(
         self,
         colors: bool=True,
@@ -431,7 +440,7 @@ class DentalMesh:
             edges, return_index=True, return_counts=True, axis=0,
         )
         
-        return self.edges[index[counts == 1]]       
+        return self.edges[index[counts == 1]]
     
     def crop_components(
         self,

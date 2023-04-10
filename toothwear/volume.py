@@ -2,10 +2,12 @@ from copy import deepcopy
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib import collections as mc
 import numpy as np
 from numpy.typing import NDArray
 import open3d
 from scipy.spatial import Delaunay
+from triangle import triangulate
 
 from toothwear.teeth import DentalMesh
 
@@ -149,7 +151,7 @@ def compute_extra_surface_triangles(
         edge_is_degenerate = False
 
         for k, inter in enumerate(inters[:-1]):
-            if np.all(inter == inters[k + 1]):
+            if np.linalg.norm(inter - inters[k + 1]) < 1e-4:
                 continue
 
             extra_vertices[vertex_idx] = inter
@@ -211,6 +213,9 @@ def compute_triangle_edges_map(
         for key, (inter1, inter2) in zip(triangle_idxs, inters):
             add = np.linalg.norm(inter1 - inter2) >= 1e-4
 
+            if not add:
+                k = 3
+
             ret.setdefault(key, []).append(np.concatenate(([i + init_idx], inter1)))
             ret[key].append(np.concatenate(([i + init_idx + add], inter2)))
             i += add
@@ -229,7 +234,6 @@ def orient_triangles(
     triangles: NDArray[np.int64],
     normal: NDArray[np.float32],
 ) -> NDArray[np.int64]:
-    print('dd')
     triangle_vertices = vertices[triangles]
     triangle_vectors1 = triangle_vertices[:, 1] - triangle_vertices[:, 0]
     triangle_vectors2 = triangle_vertices[:, 2] - triangle_vertices[:, 0]
@@ -245,31 +249,82 @@ def delaunay_triangulation(
     triangle_vertices: NDArray[np.float32],
     points: NDArray[np.float32],
     internal_edges: NDArray[np.int64],
-    verbose: bool=True,
+    verbose: bool=False,
 ):
     points = np.concatenate((triangle_vertices, points))
     uvs = barycentric_coords(points, triangle_vertices)
 
+    
+    uvws = np.column_stack((uvs[3:], 1 - uvs[3:, 0] - uvs[3:, 1]))
+    is_border = np.any(uvws < 1e-8, axis=-1)
+
+    border_idxs, border_orders = np.full((2, uvws.shape[0]), fill_value=-1)
+    border_idxs[is_border] = uvws[is_border].argmin(axis=-1)
+
+    border0 = (border_idxs == 0) + uvws[:, 1]
+    offset = border0.shape[0] - (border_idxs == 0).sum()
+    border0 = border0.argsort()[offset:]
+    border0 = np.concatenate(([2], 3 + border0, [1]))
+
+    border1 = (border_idxs == 1) + uvws[:, 0]
+    offset = border1.shape[0] - (border_idxs == 1).sum()
+    border1 = border1.argsort()[offset:]
+    border1 = np.concatenate(([2], 3 + border1, [0]))
+
+    border2 = (border_idxs == 2) + uvws[:, 0]
+    offset = border2.shape[0] - (border_idxs == 2).sum()
+    border2 = border2.argsort()[offset:]
+    border2 = np.concatenate(([1], 3 + border2, [0]))
+
+    tri = {
+        'vertices': uvs,
+        'segments': np.concatenate((
+            3 + internal_edges,
+            np.column_stack((border0[:-1], border0[1:])),
+            np.column_stack((border1[:-1], border1[1:])),
+            np.column_stack((border2[:-1], border2[1:])),
+        )),
+    }
+
+    equal_uvs = np.all(uvs[3:, np.newaxis] == uvs[np.newaxis, 3:], axis=-1)
+    if equal_uvs.sum() == uvs.shape[0] - 3:
+        t = triangulate(tri, 'p')
+        vertices, triangles = t['vertices'], t['triangles']
+
+        if triangles.shape[0] <= 3:
+            return triangles
+
+        edges = np.concatenate((
+            triangles[:, [0, 1]],
+            triangles[:, [1, 2]],
+            triangles[:, [2, 0]],
+        )) - 3
+
+        internal_edges = internal_edges[internal_edges[:, 0] != internal_edges[:, 1]]
+        has_edge = internal_edges[:, np.newaxis] == edges[np.newaxis]
+        has_edge = np.any(np.all(has_edge, axis=-1), axis=-1)
+
+        if np.all(has_edge):
+            # standard Delaunay triangulation is sufficient
+            return triangles 
+
+    if verbose:
+        lc = mc.LineCollection(uvs[tri['segments']])
+        plt.gca().add_collection(lc)
+        plt.gca().margins(0.1)
+        plt.show(block=True)
+    
     tri = Delaunay(uvs)
     triangles = tri.simplices
+    triangle_copy = triangles.copy()  
 
-    if triangles.shape[0] <= 3:
-        return triangles
 
-    edges = np.concatenate((
-        triangles[:, [0, 1]],
-        triangles[:, [1, 2]],
-        triangles[:, [2, 0]],
-    )) - 3
-
-    has_edge = internal_edges[:, np.newaxis] == edges[np.newaxis]
-    has_edge = np.any(np.all(has_edge, axis=-1), axis=-1)
-
-    if np.all(has_edge):
-        # standard Delaunay triangulation is sufficient
-        return triangles
     
-    triangle_copy = triangles.copy()
+    if verbose:
+        pass
+        # plt.triplot(vertices[:, 0], vertices[:, 1], triangles)
+        # plt.title(f'Number of triangles: {triangles.shape[0]}')
+        # plt.show(block=True)
     
 
 
@@ -280,13 +335,14 @@ def delaunay_triangulation(
 
     uvws = np.column_stack((uvs[3:], 1 - uvs[3:, 0] - uvs[3:, 1]))
     border_idxs, border_orders = np.full((2, uvws.shape[0]), fill_value=-1)
-    is_border = np.any(uvws < 1e-6, axis=-1)
+    is_border = np.any(uvws < 1e-8, axis=-1)
     border_idxs[is_border] = uvws[is_border].argmin(axis=-1)
     border_orders[border_idxs == 0] = uvws[border_idxs == 0, 1].argsort().argsort()
     border_orders[border_idxs == 1] = uvws[border_idxs == 1, 0].argsort().argsort()
     border_orders[border_idxs == 2] = uvws[border_idxs == 2, 0].argsort().argsort()
     unique, counts = np.unique(border_idxs, return_counts=True)
-    border_counts = counts[unique >= 0]
+    border_counts = np.zeros(3, dtype=int)
+    border_counts[unique[unique >= 0]] = counts[unique >= 0]
 
     triangles = np.zeros((0, 3), dtype=int)
     for i, (start_idx, end_idx) in enumerate(internal_edges):
@@ -299,6 +355,10 @@ def delaunay_triangulation(
             idx = start_idx
 
         border_idx = border_idxs[idx]
+
+        if border_idx == -1:
+            continue
+
         border_order = border_orders[idx]
 
         if border_order > 0:
@@ -317,18 +377,108 @@ def delaunay_triangulation(
         triangle = [start_idx + 3, end_idx + 3, next_vertex_idx]
         triangles = np.concatenate((triangles, [triangle]))
 
-    edges = np.sort(np.concatenate((
-        triangles[:, [0, 1]],
-        triangles[:, [1, 2]],
-        triangles[:, [2, 0]],
-    )), axis=-1)
-    for idx in (np.nonzero(border_idxs == -1)[0] + 3):
-        inside_edges = edges[np.any(edges == idx, axis=-1)]
-        unique, counts = np.unique(inside_edges, return_counts=True, axis=0)
-        triangle = np.unique(unique[counts == 1])
+    # add triangles between internal vertices
+    idxs = np.nonzero(border_idxs == -1)[0] + 3
+    # if idxs.shape[0] < 2 or np.linalg.norm(uvs[idxs[0]] - uvs[idxs[1]]) >= 1e-4:
+    #     edges = np.sort(np.concatenate((
+    #         triangles[:, [0, 1]],
+    #         triangles[:, [1, 2]],
+    #         triangles[:, [2, 0]],
+    #     )), axis=-1)
+    #     for idx in idxs:
+    #         inside_edges = edges[np.any(edges == idx, axis=-1)]
+    #         unique, counts = np.unique(inside_edges, return_counts=True, axis=0)
+    #         triangle = np.unique(unique[counts == 1])
 
+    #         if np.any(triangle < 3):
+    #             continue
+
+    #         triangles = np.concatenate((triangles, [triangle]))
+
+    uvws = np.column_stack((uvs, 1 - uvs[:, 0] - uvs[:, 1]))
+    if idxs.shape[0] < 2 or np.linalg.norm(uvs[idxs[0]] - uvs[idxs[1]]) >= 1e-4:
+        edges = np.sort(np.concatenate((
+            triangles[:, [0, 1]],
+            triangles[:, [1, 2]],
+            triangles[:, [2, 0]],
+        )), axis=-1)
+        for idx in idxs:
+            _, inverse, counts = np.unique(edges, return_inverse=True, return_counts=True, axis=0)
+            inside_mask = np.any(edges == idx, axis=-1) & (counts == 1)[inverse]
+
+            for idx1, idx2 in edges[inside_mask]:
+                if idx2 == idx:
+                    idx1, idx2 = idx2, idx1
+
+                inside_mask2 = ~inside_mask & np.any(edges == idx2, axis=-1) & (counts == 1)[inverse]
+                inside_edges = edges[inside_mask2]
+                for edge in inside_edges:
+                    if np.any(np.all(uvws[edge] < 1e-4, axis=0)):
+                        continue
+
+                    triangle = np.sort(np.concatenate((edge, [idx])))
+                    triangles = np.concatenate((triangles, [triangle]))
+
+    # add triangle with vertex not yet included
+    mask = np.unique(triangles)[np.newaxis] == np.arange(points.shape[0])[:, np.newaxis]
+    missing = ~np.any(mask, axis=-1)
+    missing_idxs = np.nonzero(missing)[0]
+    if missing_idxs.shape[0] > 0:
+        if missing_idxs[0] == 0:
+            if 1 in border_idxs:
+                first_idx = 3 + ((border_idxs == 1) + border_orders).argmax()
+            else:
+                first_idx = 2
+            
+            if 2 in border_idxs:
+                second_idx = 3 + ((border_idxs == 2) + border_orders).argmax()
+            else:
+                second_idx = 1
+        elif missing_idxs[0] == 1:
+            if 0 in border_idxs:
+                first_idx = 3 + ((border_idxs == 0) + border_orders).argmax()
+            else:
+                first_idx = 2
+            
+            if 2 in border_idxs:
+                second_idx = 3 + ((border_idxs != 2) + border_orders).argmin()
+            else:
+                second_idx = 0
+        elif missing_idxs[0] == 2:
+            if 0 in border_idxs:
+                first_idx = 3 + ((border_idxs != 0) + border_orders).argmin()
+            else:
+                first_idx = 1
+            
+            if 1 in border_idxs:
+                second_idx = 3 + ((border_idxs != 1) + border_orders).argmin()
+            else:
+                second_idx = 0
+
+        triangle = np.array([missing_idxs[0], first_idx, second_idx])
         triangles = np.concatenate((triangles, [triangle]))
 
+    
+        
+    # only keep unique triangles
+    triangles = np.sort(triangles, axis=-1)
+    triangles = np.unique(triangles, axis=0)
+
+    # add any remaining triangle    
+    if idxs.shape[0] < 2 or np.linalg.norm(uvs[idxs[0]] - uvs[idxs[1]]) >= 1e-4:
+        edges = np.sort(np.concatenate((
+            triangles[:, [0, 1]],
+            triangles[:, [1, 2]],
+            triangles[:, [2, 0]],
+        )), axis=-1)
+        cross_mask = ~np.any(np.all(uvws[edges] < 1e-4, axis=1), axis=-1)
+        _, inverse, counts = np.unique(edges, return_inverse=True, return_counts=True, axis=0)
+        cross_mask &= (counts == 1)[inverse]
+
+        assert cross_mask.sum() <= 2
+        if cross_mask.sum() == 2:
+            triangle = np.unique(edges[cross_mask])
+            triangles = np.concatenate((triangles, [triangle]))
 
     vertices = points[triangle_copy[0]]
     vector1 = vertices[1] - vertices[0]
@@ -337,16 +487,10 @@ def delaunay_triangulation(
 
     triangles = orient_triangles(points, triangles, normal)
 
-
-
-    plt.triplot(uvs[:, 0], uvs[:, 1], triangles)
-    plt.title(f'Number of triangles: {triangles.shape[0]}')
-    plt.show(block=True)
-
-    k = 3
-        
-
-
+    if verbose:
+        plt.triplot(uvs[:, 0], uvs[:, 1], triangles)
+        plt.title(f'Number of triangles: {triangles.shape[0]}')
+        plt.show(block=True)
         
     return triangles
 
@@ -356,7 +500,7 @@ def compute_extra_test_triangles(
     intersections: List[NDArray[np.float32]],
     test_triangle_idxs: List[NDArray[np.int64]],
     init_idx: int,
-    verbose: bool=True,
+    verbose: bool=False,
 ):    
     triangle_edges_map = compute_triangle_edges_map(
         intersections, test_triangle_idxs, init_idx,
@@ -371,11 +515,14 @@ def compute_extra_test_triangles(
             vertex_idxs, return_index=True, return_inverse=True,
         )
 
-        if test_triangle_idx in [9433, 9434]:
+        if test_triangle_idx in [374]:
             k = 3
 
         # determine internal triangles of test triangle
         test_triangle = test.triangles[test_triangle_idx]
+        print(test_triangle_idx)
+        if test_triangle_idx == 12279:
+            k = 3
         triangles = delaunay_triangulation(
             test.vertices[test_triangle],
             intersections[index],
@@ -514,10 +661,13 @@ def compute_edge_triangle_intersections(
         edge_vertices = closest_points['points'][edge]
         edge_triangle_idxs = closest_points['primitive_ids'][edge]
 
+        if 256 in edge_triangle_idxs:
+            k = 3
+
         if edge_triangle_idxs[0] == edge_triangle_idxs[1]:
             # surface edge projects to single test triangle
-            intersections.append(edge_vertices)
-            test_triangle_idxs.append(edge_triangle_idxs)
+            intersections.append(list(edge_vertices))
+            test_triangle_idxs.append(list(edge_triangle_idxs))
 
             continue
 
@@ -538,7 +688,7 @@ def compute_edge_triangle_intersections(
         stop = False
         i = 0
         while True:
-            if i >1000:
+            if i > 1000:
 
                 print(current_triangle_idx)
                 k = 3
@@ -559,15 +709,12 @@ def compute_edge_triangle_intersections(
             intersection_vectors = tri_intersections - intersections[-1][-1]
             distances = np.linalg.norm(intersection_vectors, axis=-1)
 
-            directions = edge_vector @ intersection_vectors.T
-            directions[distances <= 1e-4] = 0
-            directions[np.isinf(distances)] = 0
+            nan_mask = (distances <= 1e-4) | np.isinf(distances)
 
+            directions = np.zeros_like(distances)
+            directions[~nan_mask] = edge_vector @ intersection_vectors[~nan_mask].T
 
             intersect_idx = ((directions <= 0) + distances).argmin()
-
-            if np.any(distances < 1e-4):
-                k = 3
 
             # determine neighbouring triangle
             edge_mask = np.all(test_edges == triangle_edges[intersect_idx], axis=-1)
@@ -579,6 +726,7 @@ def compute_edge_triangle_intersections(
                 test_triangle_idxs[-1] = []
 
             if triangle_idxs.shape[0] == 1:
+                # encounter a border
                 next_triangle_idx = -1
                 break
 
@@ -610,7 +758,7 @@ def compute_edge_triangle_intersections(
 
             i += 1       
 
-        if np.all(np.abs(intersections[-1][-1] - edge_vertices[1]) < 1e-4):
+        if np.linalg.norm(intersections[-1][-1] - edge_vertices[1]) < 1e-4:
             # remove last point if last point is on edge/vertex
             next_triangle_idx = test_triangle_idxs[-1][-1]
             test_triangle_idxs[-1] = test_triangle_idxs[-1][:-1]
@@ -657,19 +805,22 @@ def crop_watertight(
         border_triangle_idxs = edge_idxs[is_border_edge] % mesh.triangles.shape[0]
         inside_triangle_mask = np.ones(mesh.triangles.shape[0], dtype=bool)
         inside_triangle_mask[border_triangle_idxs] = False
-
-        mesh.triangles = mesh.triangles[inside_triangle_mask]
         
-        inside_vertex_idxs = np.unique(mesh.triangles)
+        inside_vertex_idxs = np.unique(mesh.triangles[inside_triangle_mask])
         inside_vertex_mask = np.zeros(mesh.vertices.shape[0], dtype=bool)
         inside_vertex_mask[inside_vertex_idxs] = True
-
-        mesh = mesh[inside_vertex_mask]
-
+        
         if verbose:
+            outside_vertex_idxs = np.unique(mesh.triangles[~inside_triangle_mask])
+            outside_vertex_mask = np.ones(mesh.vertices.shape[0], dtype=bool)
+            outside_vertex_mask[outside_vertex_idxs] = False
+            mesh.labels = 1 - outside_vertex_mask.astype(int)
             o3d_mesh = mesh.to_open3d_triangle_mesh()
             open3d.io.write_triangle_mesh('test2.obj', o3d_mesh)
             open3d.visualization.draw_geometries([o3d_mesh])
+
+        mesh.triangles = mesh.triangles[inside_triangle_mask]
+        mesh = mesh[inside_vertex_mask]
 
         if mesh.vertices.shape[0] == 0:
             break
@@ -726,13 +877,46 @@ def split_triangles(mesh: open3d.geometry.TriangleMesh) -> open3d.geometry.Trian
     return mesh_return
 
 
+def make_holes(mesh: DentalMesh) -> DentalMesh:
+    edges = np.sort(mesh.edges, axis=-1)
+    _, inverse, counts = np.unique(edges, return_inverse=True, return_counts=True, axis=0)
+    non_manifold_mask = (counts == 3)[inverse]
+
+    triangle_idxs = np.nonzero(non_manifold_mask)[0] % mesh.triangles.shape[0]
+
+    # vertex_mask = np.zeros(mesh.vertices.shape[0], dtype=bool)
+    # vertex_mask[np.unique(edges[non_manifold_mask])] = True
+
+    # triangle_mask = np.any(vertex_mask[mesh.triangles], axis=-1)
+    # vertex_mask = np.zeros(mesh.vertices.shape[0], dtype=bool)
+    # vertex_mask[np.unique(mesh.triangles[triangle_mask])] = True
+    
+    border_mesh = mesh.copy()
+    border_mesh.triangles = border_mesh.triangles[triangle_idxs]
+    components = border_mesh.crop_components()
+    vertex_idxs = []
+    for component in components:
+        centroid = component.vertices.mean(axis=0)
+        vertex_idx = np.linalg.norm(mesh.vertices - centroid, axis=-1).argmin()
+        triangle_idx = np.any(mesh.triangles == vertex_idx, axis=-1).argmax()
+
+        vertex_idxs.append(vertex_idx)
+
+    vertex_mask = np.ones(mesh.vertices.shape[0], dtype=bool)
+    vertex_mask[vertex_idxs] = False
+        
+    mesh = mesh[vertex_mask]
+
+    return mesh
+
+
 def volumes2(
     reference: DentalMesh,
     test: DentalMesh,
     verbose: bool=True,
 ) -> NDArray[np.float32]:
     signed_dists = reference.signed_distances(test)
-    signed_dists[reference.border_mask(layers=1)] = np.nan
+    signed_dists[reference.border_mask(layers=2)] = np.nan
 
     signs = np.sign(signed_dists)
     
@@ -740,7 +924,16 @@ def volumes2(
     neg = reference[signed_dists < -0.02].crop_components()
 
     volumes = []
-    for surface in neg[1:]:
+    for surface in neg[6:]:
+
+        mesh = DentalMesh(
+            vertices=np.concatenate((surface.vertices, test.vertices)),
+            triangles=np.concatenate((surface.triangles, test.triangles + surface.vertices.shape[0])),
+            normals=np.concatenate((surface.normals, test.normals)),
+        )
+        o3d_mesh = mesh.to_open3d_triangle_mesh()
+        #open3d.visualization.draw_geometries([o3d_mesh])
+
         boundaries = compute_boundaries(surface)
 
         extra_vertices, extra_triangles, extra_normals = np.zeros((3, 0, 3))
@@ -779,8 +972,8 @@ def volumes2(
                     normals=np.concatenate((surface.normals, test.normals, extra_normals)),
                 )
 
-                edges = np.sort(mesh.edges, axis=-1)
-                unique, counts = np.unique(edges, return_counts=True, axis=0)
+                edges_sorted = np.sort(mesh.edges, axis=-1)
+                unique, counts = np.unique(edges_sorted, return_counts=True, axis=0)
                 edge_vertices = np.unique(unique[counts == 1])
                 vertex_mask = np.zeros(mesh.vertices.shape[0], dtype=bool)
                 vertex_mask[edge_vertices] = True
@@ -794,7 +987,12 @@ def volumes2(
                 # o3d_mesh.vertex_colors = open3d.utility.Vector3dVector(colors)
 
                 open3d.io.write_triangle_mesh('test.obj', o3d_mesh)
-                open3d.visualization.draw_geometries([o3d_mesh])
+                # open3d.visualization.draw_geometries([o3d_mesh])
+
+            
+            extra_test = compute_extra_test_triangles(
+                test, intersections, test_triangle_idxs, init_idx,
+            )
 
         test_mask = np.ones(test.triangles.shape[0], dtype=bool)
         test_mask[all_test_triangle_idxs] = False
@@ -811,6 +1009,13 @@ def volumes2(
         # default_vertices = surface.vertices.shape[0] + test.vertices.shape[0]
         open3d.io.write_triangle_mesh('test.obj', mesh.to_open3d_triangle_mesh())
         mesh = crop_watertight(mesh)
+
+        if verbose:
+            open3d.visualization.draw_geometries([
+                mesh.to_open3d_triangle_mesh(),
+            ])
+        mesh = make_holes(mesh)
+        mesh = crop_watertight(mesh, verbose=True)
 
         if verbose:
             open3d.visualization.draw_geometries([

@@ -24,7 +24,7 @@ def main(
     reference = load_dental_mesh(root, reference_stem, reference=True)
     test = load_dental_mesh(root, test_stem, reference=False)
     # draw_meshes([reference, test], color=False)
-    draw_meshes([reference, test])
+    # draw_meshes([reference, test])
 
     T = procrustes(reference, test)
     reference = reference.transform(T)
@@ -72,7 +72,7 @@ def main(
 
 
 if __name__ == '__main__':
-    root = Path('/home/mkaailab/Documents/toothwear')
+    root = Path('/mnt/c/Users/Administrator/Downloads')
 
     main(
         root=root,
