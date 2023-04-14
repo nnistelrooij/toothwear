@@ -43,12 +43,17 @@ class DentalMesh:
         normals: NDArray[np.float32],
         labels: Optional[NDArray[np.int64]]=None,
         reference: bool=True,
+        check: bool=True,
     ) -> None:
-        # remove unreferenced vertices
         triangles = triangles.astype(np.int64)
-        vertex_idxs = np.unique(triangles)
-        vertex_mask = np.zeros(vertices.shape[0], dtype=bool)
-        vertex_mask[vertex_idxs] = True
+
+        if check:
+            # remove unreferenced vertices
+            vertex_idxs = np.unique(triangles)
+            vertex_mask = np.zeros(vertices.shape[0], dtype=bool)
+            vertex_mask[vertex_idxs] = True
+        else:
+            vertex_mask = np.ones(vertices.shape[0], dtype=bool)
         vertices = vertices[vertex_mask]
 
         # normalize normals
@@ -57,18 +62,17 @@ class DentalMesh:
         normals[norms > 0] /= norms[norms > 0, np.newaxis]
 
         # realign vertex indices
-        vertex_map = np.cumsum(vertex_mask) - 1
-        triangles = vertex_map[triangles]
+        if check:
+            vertex_map = np.cumsum(vertex_mask) - 1
+            triangles = vertex_map[triangles]
 
         # set default labels
         if labels is None:
             labels = np.zeros(vertices.shape[0], dtype=int)
         else:
-            labels = labels[vertex_mask]
+            labels = labels[vertex_mask]            
 
-            
-
-        self.vertices = vertices.astype(np.float32)
+        self.vertices = vertices.astype(np.float64)
         self.triangles = triangles.astype(np.int64)
         self.normals = normals.astype(np.float32)
         self.labels = labels.astype(np.int64)
@@ -230,7 +234,7 @@ class DentalMesh:
             np.column_stack((self.vertices, self.normals)),
             np.column_stack((self.vertices, -self.normals)),
         ))
-        ray_dict = scene.cast_rays(rays)
+        ray_dict = scene.cast_rays(rays.astype(np.float32))
         ray_dict = {k: v.numpy() for k, v in ray_dict.items()}
 
         if not allow_back_faces:
@@ -247,7 +251,7 @@ class DentalMesh:
             ray_dict['t_hit'][~hit] = np.inf
 
         signs = 1 - 2 * ray_dict['t_hit'].argmin(axis=0)
-        distances = ray_dict['t_hit'].min(axis=0)
+        distances = ray_dict['t_hit'].min(axis=0).astype(np.float64)
         
         hit = np.isfinite(distances)[:, np.newaxis]
         idx = ray_dict['t_hit'].argmin(axis=0), np.arange(hit.shape[0]), slice(None)
@@ -279,10 +283,10 @@ class DentalMesh:
 
             return ray_dict
 
-        closest_points = scene.compute_closest_points(self.vertices)
+        closest_points = scene.compute_closest_points(self.vertices.astype(np.float32))
         closest_points = {k: v.numpy() for k, v in closest_points.items()}
 
-        test_points = closest_points['points']
+        test_points = closest_points['points'].astype(np.float64)
         vectors = test_points - self.vertices
         distances = np.linalg.norm(vectors, axis=-1)
 
@@ -315,6 +319,7 @@ class DentalMesh:
         vertex_mask[border_vertices] = True
         nohit[nohit] = vertex_mask
 
+        closest_points['points'] = closest_points['points'].astype(np.float64)
         closest_points['points'][nohit] = np.nan
         closest_points['geometry_ids'][nohit] = -1
         closest_points['primitive_ids'][nohit] = -1
@@ -546,6 +551,14 @@ class DentalMesh:
         wear_idx = idx_map[wear_idx]
 
         return wear_idx, wear_mm
+    
+    @property
+    def num_vertices(self) -> int:
+        return self.vertices.shape[0]
+
+    @property
+    def num_triangles(self) -> int:
+        return self.triangles.shape[0]
 
     @property
     def edges(self) -> NDArray[np.int64]:

@@ -63,8 +63,8 @@ def main(
 
         wear_idx, wear_mm = reference_tooth.measure_wear(test_tooth, normal)
         V1 = volumes2(reference_tooth, test_tooth)
-        V1 = reference_tooth.signed_volumes(test_tooth, verbose=True)
-        V2 = test_tooth.signed_volumes(reference_tooth, verbose=True)
+        # V1 = reference_tooth.signed_volumes(test_tooth, verbose=True)
+        # V2 = test_tooth.signed_volumes(reference_tooth, verbose=True)
         print(f'Maximum profile loss: {wear_mm:.3f}mm')
         print(f'Overall volume loss: {np.nansum(V1):.3f}mm3')
         print(f'Overall volume loss: {np.nansum(V2):.3f}mm3')
@@ -73,6 +73,7 @@ def main(
 
 if __name__ == '__main__':
     root = Path('/mnt/c/Users/Administrator/Downloads')
+    root = Path('/home/mkaailab/Documents/toothwear')
 
     main(
         root=root,
