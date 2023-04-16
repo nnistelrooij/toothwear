@@ -13,7 +13,7 @@ from toothwear.visualization import (
     draw_meshes,
     draw_result,
 )
-from toothwear.volume import volumes2
+from toothwear.volume.volume2 import volumes
 
 
 def main(
@@ -62,7 +62,7 @@ def main(
 
 
         wear_idx, wear_mm = reference_tooth.measure_wear(test_tooth, normal)
-        V1 = volumes2(reference_tooth, test_tooth)
+        V1 = volumes(reference_tooth, test_tooth)
         # V1 = reference_tooth.signed_volumes(test_tooth, verbose=True)
         # V2 = test_tooth.signed_volumes(reference_tooth, verbose=True)
         print(f'Maximum profile loss: {wear_mm:.3f}mm')
@@ -73,7 +73,7 @@ def main(
 
 if __name__ == '__main__':
     root = Path('/mnt/c/Users/Administrator/Downloads')
-    root = Path('/home/mkaailab/Documents/toothwear')
+    # root = Path('/home/mkaailab/Documents/toothwear')
 
     main(
         root=root,

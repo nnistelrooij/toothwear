@@ -38,13 +38,22 @@ class DentalMesh:
 
     def __init__(
         self,
-        vertices: NDArray[np.float32],
-        triangles: NDArray[np.int64],
-        normals: NDArray[np.float32],
+        vertices: Optional[NDArray[np.float64]]=None,
+        triangles: Optional[NDArray[np.int64]]=None,
+        normals: Optional[NDArray[np.float64]]=None,
         labels: Optional[NDArray[np.int64]]=None,
         reference: bool=True,
         check: bool=True,
     ) -> None:
+        if vertices is None:
+            vertices = np.ones((0, 3))
+            
+        if normals is None:
+            normals = np.ones((0, 3))
+
+        if triangles is None:
+            triangles = np.ones((0, 3), dtype=int)
+
         triangles = triangles.astype(np.int64)
 
         if check:
@@ -54,28 +63,28 @@ class DentalMesh:
             vertex_mask[vertex_idxs] = True
         else:
             vertex_mask = np.ones(vertices.shape[0], dtype=bool)
-        vertices = vertices[vertex_mask]
-
-        # normalize normals
-        normals = normals[vertex_mask]
-        norms = np.linalg.norm(normals, axis=-1)
-        normals[norms > 0] /= norms[norms > 0, np.newaxis]
+        vertices = vertices[vertex_mask].astype(np.float64)
+        normals = normals[vertex_mask].astype(np.float64)
 
         # realign vertex indices
         if check:
             vertex_map = np.cumsum(vertex_mask) - 1
             triangles = vertex_map[triangles]
 
+        # normalize normals
+        norms = np.linalg.norm(normals, axis=-1)
+        normals[norms > 0] /= norms[norms > 0, np.newaxis]
+
         # set default labels
         if labels is None:
             labels = np.zeros(vertices.shape[0], dtype=int)
         else:
-            labels = labels[vertex_mask]            
+            labels = labels[vertex_mask].astype(np.int64)
 
-        self.vertices = vertices.astype(np.float64)
-        self.triangles = triangles.astype(np.int64)
-        self.normals = normals.astype(np.float32)
-        self.labels = labels.astype(np.int64)
+        self.vertices = vertices
+        self.triangles = triangles
+        self.normals = normals
+        self.labels = labels
         self.reference = reference
 
     @classmethod

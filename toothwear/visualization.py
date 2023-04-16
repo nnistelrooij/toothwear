@@ -9,7 +9,7 @@ from toothwear.teeth import DentalMesh
 
 
 def draw_meshes(
-    dental_meshes: List[DentalMesh],
+    *dental_meshes: List[DentalMesh],
     color: bool=True,
 ) -> None:
     o3d_meshes = []
