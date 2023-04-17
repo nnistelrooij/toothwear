@@ -74,6 +74,7 @@ def main(
 if __name__ == '__main__':
     root = Path('/mnt/c/Users/Administrator/Downloads')
     # root = Path('/home/mkaailab/Documents/toothwear')
+    root = Path('/mnt/d/Users/Niels-laptop/Documents/Toothwear')
 
     main(
         root=root,
