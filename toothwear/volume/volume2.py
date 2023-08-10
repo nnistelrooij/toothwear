@@ -8,7 +8,7 @@ from tqdm import tqdm
 from toothwear.teeth import DentalMesh
 from toothwear.visualization import draw_meshes
 from toothwear.volume.boundaries import compute_boundaries
-from toothwear.volume.intersections import determine_boundary_test_intersections
+from toothwear.volume.intersections import determine_boundary_test_intersections, TestGapException
 from toothwear.volume.surface_triangles import determine_triangles_from_surface
 from toothwear.volume.test_triangles import determine_triangles_from_test
 from toothwear.volume.triangle_edges_map import update_test_triangle_edges_map
@@ -25,7 +25,9 @@ def crop_positive_negative_surfaces(
     pos = reference[signed_dists >= thresh].crop_components()
     neg = reference[signed_dists <= -thresh].crop_components()
 
-    return pos + neg
+    is_positive = np.array([True, False]).repeat((len(pos), len(neg)))
+
+    return pos + neg, is_positive
 
 
 def make_holes(
@@ -37,16 +39,24 @@ def make_holes(
     ],
     mesh: DentalMesh,
 ) -> DentalMesh:
+    # remove triangles for which internal triangles were added
+    test_triangle_idxs = np.array(list(test_triangle_edges_map.keys()))
+    test_triangle_idxs = test_triangle_idxs[test_triangle_idxs >= 0]
+    triangle_mask = np.ones(mesh.num_triangles, dtype=bool)
+    triangle_mask[surface.num_triangles + test_triangle_idxs] = False
+    
+    mesh.triangles = mesh.triangles[triangle_mask]
+
     if len(boundaries) == 1:
         return mesh
     
-    extra_vertices = mesh.vertices[surface.vertices.shape[0]:]
-    extra_triangles_mask = np.all(mesh.triangles >= surface.vertices.shape[0], axis=-1)
+    extra_vertices = mesh.vertices[surface.num_vertices:]
+    extra_triangles_mask = np.all(mesh.triangles >= surface.num_vertices, axis=-1)
     extra_triangles = mesh.triangles[extra_triangles_mask]
-    triangle_idx_map = np.arange(mesh.triangles.shape[0])
+    triangle_idx_map = np.arange(mesh.num_triangles)
     triangle_idx_map = triangle_idx_map[extra_triangles_mask]
 
-    boundary_counts = [len(edges) for edges in boundaries]
+    boundary_counts = [edges.shape[0] for edges in boundaries]
     boundary_idxs = np.argsort(boundary_counts)[:-1]
 
     triangle_idxs = []
@@ -55,19 +65,15 @@ def make_holes(
         centroid = surface.vertices[vertex_idxs].mean(axis=0)
 
         vertex_idx = np.linalg.norm(extra_vertices - centroid, axis=-1).argmin()
-        vertex_idx += surface.vertices.shape[0]
+        vertex_idx += surface.num_vertices
 
         triangle_idx = np.any(extra_triangles == vertex_idx, axis=-1).argmax()
         triangle_idx = triangle_idx_map[triangle_idx]
 
         triangle_idxs.append(triangle_idx)
 
-    triangle_mask = np.ones(mesh.triangles.shape[0], dtype=bool)
+    triangle_mask = np.ones(mesh.num_triangles, dtype=bool)
     triangle_mask[triangle_idxs] = False
-
-    # remove triangles for which internal triangles were added
-    test_triangle_idxs = np.array(list(test_triangle_edges_map.keys()))
-    triangle_mask[test_triangle_idxs + surface.num_triangles] = False
 
     mesh.triangles = mesh.triangles[triangle_mask]
 
@@ -76,22 +82,8 @@ def make_holes(
 
 def crop_watertight(
     mesh: DentalMesh,
-    verbose: bool=True,
+    verbose: bool=False,
 ) -> DentalMesh:
-    # # fill any missing holes
-    # o3d_mesh = mesh.to_open3d_triangle_mesh()
-    # o3dt_mesh = open3d.t.geometry.TriangleMesh.from_legacy(o3d_mesh)
-    # o3dt_mesh = o3dt_mesh.fill_holes()
-    # triangles = o3dt_mesh.triangle.indices.numpy()
-
-    # # extra_triangles = triangles[mesh.triangles.shape[0]:]
-    # extra_triangles = triangles[np.any(triangles >= total_vertices, axis=-1)]
-    # unique, counts = np.unique(extra_triangles, return_counts=True, axis=0)
-    # extra_triangles = unique[counts == 1]
-
-    # mesh.triangles = np.concatenate((mesh.triangles, extra_triangles))
-
-
     while True:
         edges = np.sort(mesh.edges, axis=-1)
         _, inverse, counts = np.unique(
@@ -114,6 +106,8 @@ def crop_watertight(
         
         if verbose:
             outside_vertex_idxs = np.unique(mesh.triangles[~inside_triangle_mask])
+            if np.any(outside_vertex_idxs < 1224):
+                k = 3
             outside_vertex_mask = np.ones(mesh.vertices.shape[0], dtype=bool)
             outside_vertex_mask[outside_vertex_idxs] = False
             mesh.labels = 1 - outside_vertex_mask.astype(int)
@@ -130,9 +124,21 @@ def crop_watertight(
     return mesh
 
 
+def compute_volume(
+    mesh: DentalMesh,
+) -> float:
+    triangles_vertices = mesh.vertices[mesh.triangles]
+
+    cross = np.cross(triangles_vertices[:, 1], triangles_vertices[:, 2])
+    volume = np.einsum('ij,ij', triangles_vertices[:, 0], cross) / 6
+
+    return volume
+
+
 def determine_mesh_between(
     surface: DentalMesh,
     test: DentalMesh,
+    is_positive: bool,
     verbose: bool=False,
 ) -> DentalMesh:
     if verbose:
@@ -158,7 +164,7 @@ def determine_mesh_between(
             test_triangle_idxs,
         )
 
-        init_idx = vertex_idxs[-1][:-1].max() + 1
+        init_idx = np.sort(vertex_idxs[-1])[-1] + 1
 
     extra = determine_triangles_from_test(
         surface, test, extra, test_triangle_edges_map,
@@ -174,16 +180,27 @@ def determine_mesh_between(
         normals=np.concatenate((surface.normals, test.normals, extra.normals)),
     )
 
-    if surface.vertices.mean() < extra.vertices.mean():
+    if is_positive:
         mesh.triangles = mesh.triangles[:, [1, 0, 2]]
     
     mesh = make_holes(surface, boundaries, test_triangle_edges_map, mesh)
-    mesh = crop_watertight(mesh)
+    mesh = crop_watertight(mesh, verbose=False)
 
-    k = 3
 
+    # o3d_mesh = mesh.to_open3d_triangle_mesh()
+    # triangle_pairs = np.asarray(o3d_mesh.get_self_intersecting_triangles())
+
+    # if triangle_pairs.shape[0] == 0:
+    #     return mesh
     
-    
+    # for triangle_pair in triangle_pairs:    
+    #     vertex_idxs = np.unique(mesh.triangles[triangle_pair])
+    #     vertex_mask = np.zeros(mesh.num_vertices, dtype=bool)
+    #     vertex_mask[vertex_idxs] = True
+    #     mesh.labels = vertex_mask.astype(int)
+    #     open3d.visualization.draw_geometries([mesh.to_open3d_triangle_mesh()])
+
+    return mesh
     
 
 def volumes(
@@ -191,12 +208,23 @@ def volumes(
     test: DentalMesh,
     verbose: bool=False
 ) -> NDArray[np.float64]:
-    surfaces = crop_positive_negative_surfaces(reference, test)
+    surfaces, is_positive = crop_positive_negative_surfaces(reference, test)
 
-    volumes = []
-    for surface in tqdm(surfaces, desc='Determining meshes'):
-        mesh = determine_mesh_between(surface, test, verbose)
-        o3d_mesh = mesh.to_open3d_triangle_mesh()
-        volumes.append(o3d_mesh.get_volume())
+    volumes, meshes = [], []
+    for surface, is_positive in tqdm(
+        iterable=zip(surfaces, is_positive),
+        desc='Determining meshes',
+    ):
+        try:
+            mesh = determine_mesh_between(surface, test, is_positive, verbose)
+            volume = compute_volume(mesh)
+
+            meshes.append(mesh)
+            volumes.append(volume if is_positive else -volume)
+        except TestGapException:
+            print('Cannot close surface')
+
+    o3d_meshes = [mesh.to_open3d_triangle_mesh() for mesh in meshes]
+    open3d.visualization.draw_geometries(o3d_meshes)
 
     return volumes

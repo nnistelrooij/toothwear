@@ -130,3 +130,5 @@ dmypy.json
 
 # input data folder
 data/
+methodology study/
+validation study/

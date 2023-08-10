@@ -1,23 +1,61 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
 import open3d
 from scipy.spatial.transform import Rotation
 
-from toothwear.teeth import DentalMesh
+from toothwear.teeth import DentalMesh, palette
 
 
 def draw_meshes(
-    *dental_meshes: List[DentalMesh],
+    *dental_meshes: List[Union[DentalMesh, open3d.geometry.TriangleMesh]],
     color: bool=True,
 ) -> None:
     o3d_meshes = []
     for mesh in dental_meshes:
-        o3d_mesh = mesh.to_open3d_triangle_mesh(colors=color)
+        if isinstance(mesh, open3d.geometry.TriangleMesh):
+            o3d_mesh = mesh
+        else:
+            o3d_mesh = mesh.to_open3d_triangle_mesh(colors=color)
         o3d_meshes.append(o3d_mesh)
 
     open3d.visualization.draw_geometries(o3d_meshes)
+
+
+def draw_correspondences(
+    reference: DentalMesh,
+    test: DentalMesh,
+) -> None:
+    centroids = np.concatenate((
+        np.stack(reference.centroids.values()) - reference.centroid,
+        np.stack(test.centroids.values()) - test.centroid,
+    ))
+    o3d_pcd = open3d.geometry.PointCloud(
+        points=open3d.utility.Vector3dVector(centroids),
+    )
+    colors = palette[np.arange(len(reference.unique_labels))] / 255
+    o3d_pcd.colors = open3d.utility.Vector3dVector(
+        np.concatenate((colors, colors)),
+    )
+
+    o3d_ls = open3d.geometry.LineSet(
+        points=open3d.utility.Vector3dVector(centroids),
+        lines=open3d.utility.Vector2iVector(np.column_stack((
+            np.arange(centroids.shape[0] // 2),
+            np.arange(centroids.shape[0] // 2, centroids.shape[0]),
+        )))
+    )
+
+    o3d_meshes = []
+    for vector in (
+        [0, 1, 0], [1, 0, 0], [0, 0, 1],
+    ):
+        o3dt_ls = open3d.t.geometry.LineSet.from_legacy(o3d_ls)
+        o3dt_mesh = o3dt_ls.extrude_linear(vector)
+        o3d_meshes.append(o3dt_mesh.to_legacy())
+
+    open3d.visualization.draw_geometries([o3d_pcd])
 
 
 def distances_to_colors(
@@ -31,6 +69,7 @@ def distances_to_colors(
     n_segments = n_segments // 2 - 1
 
     # make nominal distances zero
+    distances = distances.copy()
     nom_mask = (nominal[0] <= distances) & (distances <= nominal[1])
     distances[~nom_mask] -= np.where(
         np.sign(distances[~nom_mask]) < 0, nominal[0], nominal[1],
@@ -74,18 +113,28 @@ def distances_to_colors(
 def draw_heatmap(
     reference: DentalMesh,
     test: DentalMesh,
-    return_geometry: bool=False,
-) -> Optional[open3d.geometry.TriangleMesh]:
+    mask: Optional[NDArray[np.bool_]]=None,
+    verbose: bool=False,
+    return_max: bool=False,
+) -> open3d.geometry.TriangleMesh:
     distances = reference.signed_distances(test)
     colors = distances_to_colors(distances)
+
+    if mask is not None:
+        reference = reference[mask]
+        colors = colors[mask]
 
     reference = reference.to_open3d_triangle_mesh()
     reference.vertex_colors = open3d.utility.Vector3dVector(colors)
 
-    if return_geometry:
-        return reference
+    if verbose:
+        open3d.visualization.draw_geometries([reference])
+    
+    if return_max:
+        return reference, np.nanmin(distances)
 
-    open3d.visualization.draw_geometries([reference])
+    return reference
+
 
 
 def draw_landmark(
@@ -111,16 +160,24 @@ def draw_landmark(
 def draw_result(
     reference: DentalMesh,
     test: DentalMesh,
-    point_idx: int,
-    normal: NDArray[np.float32],
+    point_idx: int=-1,
+    normal: Optional[NDArray[np.float32]]=None,
 ) -> None:
     # make heatmap of reference-test distances
-    heatmap = draw_heatmap(reference, test, return_geometry=True)
+    heatmap = draw_heatmap(reference, test)
+
+    # measure point at most negative distance
+    if point_idx == -1:
+        sgn_dists = reference.signed_distances(test)
+        point_idx = np.nanargmin(sgn_dists)
 
     # color measurement location black
     colors = np.asarray(heatmap.vertex_colors) * 0.5
     colors[point_idx] = [1.0, 0.2, 0.2]
     heatmap.vertex_colors = open3d.utility.Vector3dVector(colors)
+
+    if normal is None:
+        normal = reference.normals.mean(0)
 
     # draw geometry
     viz = open3d.visualization.Visualizer()

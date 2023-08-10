@@ -6,7 +6,7 @@ from numpy.typing import NDArray
 from triangle import triangulate
 
 from toothwear.teeth import DentalMesh
-from toothwear.volume.intersections import barycentric_coords
+from toothwear.volume.intersections.intersections import barycentric_coords
 
 
 def remove_vertices(
@@ -19,12 +19,15 @@ def remove_vertices(
 ]:
     is_vertex = np.any(uvws == 1, axis=-1)
 
-    uvws = np.concatenate((uvws[:3], uvws[~is_vertex]))
+    if is_vertex.sum() > 3:
+        k = 3
 
     vertex_map = np.cumsum(~is_vertex) + 2
     vertex_map[is_vertex] = uvws[is_vertex].argmax(axis=-1)
     internal_edges = internal_edges + 3
     internal_edges = vertex_map[internal_edges]
+
+    uvws = np.concatenate((uvws[:3], uvws[~is_vertex]))
 
     return ~is_vertex[3:], uvws, internal_edges
     
@@ -104,6 +107,9 @@ def determine_triangles_from_test(
         unique, index, inverse = np.unique(
             vertex_idxs, return_index=True, return_inverse=True,
         )
+
+        if test_triangle_idx == 5487:
+            k = 3
 
         # determine internal triangles of test triangle
         test_triangle = test.triangles[test_triangle_idx]

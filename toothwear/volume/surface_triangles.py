@@ -25,20 +25,27 @@ def determine_triangles_from_surface(
     intersections: List[NDArray[np.float64]],
     vertex_idxs_list: List[NDArray[np.int64]],
     init_idx: int,
-    eps: float=1e-5,
+    eps: float=1e-3,
 ) -> DentalMesh:
+    for i, vertex_idxs in enumerate(vertex_idxs_list):
+        vertex_idxs_list[i][vertex_idxs < init_idx] += surface.num_vertices
+
     triangles = np.ones((0, 3), dtype=int)
+    max_vertex_idx = init_idx - 1
     for edge, inters, vertex_idxs in zip(boundary, intersections, vertex_idxs_list):
         start_idx, end_idx = edge
         edge_is_degenerate = False
 
         for k, (inter, vertex_idx) in enumerate(zip(inters[:-1], vertex_idxs[:-1])):
-            if np.linalg.norm(inter - inters[k + 1]) < eps:
+            if vertex_idx == vertex_idxs[k + 1]:
                 continue
 
-            if vertex_idx >= init_idx:
+            if vertex_idx > max_vertex_idx:
+                if vertex_idx > max_vertex_idx + 1:
+                    l = 3
                 extra.vertices = np.concatenate((extra.vertices, [inter]))
                 extra.normals = np.concatenate((extra.normals, [surface.normals[start_idx]]))
+                max_vertex_idx = vertex_idx
 
             vertices = np.stack((
                 surface.vertices[start_idx],
@@ -68,8 +75,6 @@ def determine_triangles_from_surface(
     # special case for last triangle
     assert end_idx == boundary[0, 0]
     triangles[triangles == vertex_idxs_list[-1][-1]] = vertex_idxs_list[0][0]
-    triangle_mask = (triangles >= surface.num_vertices) & (triangles < init_idx)
-    triangles[triangle_mask] += surface.num_vertices
 
     extra.triangles = np.concatenate((extra.triangles, triangles))
 

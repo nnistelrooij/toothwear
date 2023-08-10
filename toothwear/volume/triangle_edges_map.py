@@ -33,14 +33,21 @@ def update_test_triangle_edges_map(
                 np.concatenate((out[key][1], inters)),
             )
 
-    assert test_triangle_idxs[0][0] == test_triangle_idxs[-1][-1]
-    key_copy = key
+    assert (
+        test_triangle_idxs[0][0] == test_triangle_idxs[-1][-1]
+        or test_triangle_idxs[0][0] == test_triangle_idxs[-1][-2]
+    )
+    offset = (
+        test_triangle_idxs[-1].shape[0] > 1 and
+        test_triangle_idxs[0][0] == test_triangle_idxs[-1][-2]
+    )
+    key_copy = triangle_idxs[-1 - offset]
     
     over_idx = vertex_idxs_list[-1][-1]
     for key in out:
         out[key][0][out[key][0] == over_idx] = vertex_idxs_list[0][0]
 
-    prev_key = triangle_idxs[-2]
+    prev_key = triangle_idxs[-1 - offset]
     prev_triangle_idx = out[prev_key][0][-1]
 
     prev_triangle_mask = out[key_copy][0] == prev_triangle_idx

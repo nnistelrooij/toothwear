@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import numpy as np
 from numpy.typing import NDArray
 import open3d
@@ -81,4 +79,4 @@ def ransac_icp(
     }
     result = reg.registration_icp(reference_pcd, test_pcd, **icp_cfg)
 
-    return result.transformation
+    return result

@@ -91,13 +91,38 @@ class DentalMesh:
     def from_files(
         cls,
         mesh_file: Union[Path, str],
-        ann_file: Union[Path, str],
+        ann_file: Optional[Union[Path, str]]=None,
         **kwargs,
     ):
         vertices, triangles, normals = DentalMesh.load_mesh(mesh_file)
-        labels = DentalMesh.load_labels(ann_file)
+        labels = DentalMesh.load_labels(ann_file) if ann_file else None
 
         return cls(vertices, triangles, normals, labels, **kwargs)
+
+    def close_holes(
+        self,
+        maxholesize: int=130,
+    ):
+        mesh = pymeshlab.Mesh(
+            vertex_matrix=self.vertices,
+            face_matrix=self.triangles,
+            v_normals_matrix=self.normals,
+        )
+
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(mesh)
+        ms.meshing_repair_non_manifold_edges()
+        ms.meshing_close_holes(maxholesize=maxholesize)
+
+        mesh = ms.current_mesh()
+        mesh.compact()
+        vertices = mesh.vertex_matrix()
+        triangles = mesh.face_matrix()
+        normals = mesh.vertex_normal_matrix()
+
+        return DentalMesh(
+            vertices, triangles, normals, reference=self.reference,
+        )        
         
     @staticmethod
     def load_mesh(
@@ -105,8 +130,8 @@ class DentalMesh:
     ) -> open3d.geometry.TriangleMesh:
         ms = pymeshlab.MeshSet()
         ms.load_new_mesh(str(mesh_file))
-        ms.meshing_repair_non_manifold_edges()
-        ms.meshing_close_holes(maxholesize=130)
+        # ms.meshing_repair_non_manifold_edges()
+        # ms.meshing_close_holes(maxholesize=130)
         
         mesh = ms.current_mesh()
         vertices = mesh.vertex_matrix()
@@ -124,6 +149,12 @@ class DentalMesh:
 
         labels = ann_dict['labels']
         labels = np.array(labels)
+
+        # correct FDI confusion between arches
+        if 'mandible' in str(ann_file) and np.any(labels[labels > 0] <= 28):
+            labels[labels > 0] += 20
+        elif 'maxilla' in str(ann_file) and np.any(labels[labels > 0] > 28):
+            labels[labels > 0] -= 20        
 
         return labels
     
@@ -146,12 +177,12 @@ class DentalMesh:
         )
         o3d_mesh.compute_vertex_normals()
 
-        if not colors or self.labels is None:
-            return o3d_mesh
-        
-        _, classes = np.unique(self.labels, return_inverse=True)
-        colors = palette[classes - 1] / 255
-        o3d_mesh.vertex_colors = open3d.utility.Vector3dVector(colors)
+        if colors and self.labels is not None:
+            _, classes = np.unique(self.labels, return_inverse=True)
+            colors = palette[classes - 1]
+        else:
+            colors = palette[-1:].repeat(self.vertices.shape[0], axis=0)
+        o3d_mesh.vertex_colors = open3d.utility.Vector3dVector(colors / 255)
 
         return o3d_mesh
     
@@ -212,6 +243,7 @@ class DentalMesh:
         for label in self.unique_labels:
             mask = self.labels == label
             tooth = self[mask]
+            # tooth = tooth.close_holes()
             teeth[label] = tooth
 
         return teeth
@@ -226,12 +258,16 @@ class DentalMesh:
         index = int(directions.shape[0] * (1 - ratio))
         direction_thresh = np.sort(directions)[index]
         mask = directions >= direction_thresh
+        
+        out = self[mask].crop_largest_component()
 
         if return_mask:
             mask, _ = self._subsample_triangles(mask)
-            return mask
-
-        return self[mask]
+            mask[mask] = self[mask].crop_largest_component(return_mask=True)
+            
+            return out, mask        
+        
+        return out
     
     def _ray_triangle_intersections(
         self,
@@ -341,10 +377,15 @@ class DentalMesh:
     def signed_distances(
         self,
         test,
+        ignore_border: bool=True,
     ) -> NDArray[np.float32]:
         closest_points = self.closest_points(test)
 
-        return closest_points['signed_distances']
+        sgn_dists = closest_points['signed_distances']
+        if ignore_border:
+            sgn_dists[self.border_mask()] = np.nan
+
+        return sgn_dists
     
     def signed_volumes(
         self,
@@ -408,6 +449,7 @@ class DentalMesh:
         other,
         ratio: float=0.8,
         return_mask: bool=False,
+        crop_largest_component: bool=False,
     ):
         distances = self.signed_distances(other)
 
@@ -423,8 +465,13 @@ class DentalMesh:
         if return_mask:
             mask, _ = self._subsample_triangles(mask)
             return mask
-
-        return self[mask]
+        
+        out = self[mask]
+        
+        if crop_largest_component:
+            return out.crop_largest_component()
+        
+        return out
     
     def border_mask(
         self,
@@ -509,7 +556,8 @@ class DentalMesh:
         wear_thresh: float=0.02,
         direction_thresh: float=0.1,
         area_thresh: float=0.4,
-    ) -> Tuple[int, float]:
+        volume: bool=False,
+    ) -> Tuple[int, float, float]:
         # only keep vertices with wear
         distances = self.signed_distances(other)
         mask = ~np.isnan(distances) & (distances < -wear_thresh)
@@ -523,17 +571,22 @@ class DentalMesh:
         component_masks = self[mask].crop_components(return_mask=True)
 
         # determine statistics of each component
-        df = pd.DataFrame(columns=('min', 'mean', 'std', 'direction', 'area'))
+        columns = ('min', 'mean', 'std', 'direction', 'area')
+        columns += ('volume',) if volume else ()
+        df = pd.DataFrame(columns=columns)
         for comp_mask in component_masks:
             comp_distances = distances[mask][comp_mask]
-            comp_directions = self[mask][comp_mask].normals @ normal
+
+            component = self[mask][comp_mask]
+            comp_directions = component.normals @ normal
 
             df.loc[len(df)] = [
                 comp_distances.min(),
                 comp_distances.mean(),
                 comp_distances.std(),
                 comp_directions.mean(),
-                self[mask][comp_mask].area,
+                component.area,
+                *((component.get_volume_to(other),) if volume else ()),
             ]
 
         # determine relevant components
@@ -544,7 +597,7 @@ class DentalMesh:
         )
 
         if not df['keep'].any():
-            return -1, 0.0
+            return -1, 0.0, 0.0
         
         # determine mask for final wear component
         df['heuristic'] = df['keep'] - df['std'] * (4*df['min'] + df['mean'])
@@ -559,7 +612,10 @@ class DentalMesh:
         idx_map = idx_map[mask]
         wear_idx = idx_map[wear_idx]
 
-        return wear_idx, wear_mm
+        if not volume:
+            return wear_idx, wear_mm, 0.0
+
+        return wear_idx, wear_mm, df['volume'][df['keep']].sum()
     
     @property
     def num_vertices(self) -> int:
@@ -605,3 +661,43 @@ class DentalMesh:
     @property
     def area(self) -> float:
         return self.to_open3d_triangle_mesh().get_surface_area()
+    
+    def get_volume_to(
+        self,
+        other,
+    ) -> float:
+        import toothwear.volume.volume2 as volume
+
+        try:
+            mesh = volume.determine_mesh_between(self, other, False)
+            return volume.compute_volume(mesh)
+        except volume.TestGapException:
+            return 0.0
+
+    def save(
+        self,
+        filename: Union[Path, str],
+    ) -> None:
+        np.savez(
+            filename,
+            vertices=self.vertices,
+            triangles=self.triangles,
+            normals=self.normals,
+            labels=self.labels,
+            reference=self.reference,
+        )
+
+    @staticmethod
+    def load(
+        filename: Union[Path, str]
+    ):
+        arr_dict = np.load(filename)
+
+        return DentalMesh(
+            vertices=arr_dict['vertices'],
+            triangles=arr_dict['triangles'],
+            normals=arr_dict['normals'],
+            labels=arr_dict['labels'],
+            reference=arr_dict['reference'],
+        )
+    
