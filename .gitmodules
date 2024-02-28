@@ -1,0 +1,3 @@
+[submodule "procrustes"]
+	path = procrustes
+	url = https://github.com/theochem/procrustes
