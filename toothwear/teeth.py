@@ -314,6 +314,7 @@ class DentalMesh:
         self,
         test,
         raycast: bool=False,
+        remove_border_clusters: bool=True,
     ) -> Dict[str, NDArray[Any]]:
         test = test.to_open3d_triangle_mesh()
         test = open3d.t.geometry.TriangleMesh.from_legacy(test)
@@ -339,6 +340,9 @@ class DentalMesh:
         directions = np.einsum('ik,ik->i', self.normals, vectors)
         signs = np.sign(directions)
         closest_points['signed_distances'] = signs * distances
+
+        if not remove_border_clusters:
+            return closest_points
 
         # make measurements for non-corresponding vertices np.nan
         ray_dict = self._ray_triangle_intersections(scene)
@@ -378,8 +382,9 @@ class DentalMesh:
         self,
         test,
         ignore_border: bool=True,
+        remove_border_clusters: bool=True,
     ) -> NDArray[np.float32]:
-        closest_points = self.closest_points(test)
+        closest_points = self.closest_points(test, remove_border_clusters=remove_border_clusters)
 
         sgn_dists = closest_points['signed_distances']
         if ignore_border:

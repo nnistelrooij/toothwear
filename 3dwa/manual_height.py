@@ -30,11 +30,17 @@ def pair_heights(
         if ref_file.name[0] == 'm':
             continue
 
-        if '26' in ref_file.name:
-            k = 3
+        if '21' not in ref_file.name:
+            continue
 
         ref_mesh = DentalMesh.from_files(ref_file, reference=True)
         test_mesh = DentalMesh.from_files(test_file, reference=False)
+
+
+
+        draw_heatmap(ref_mesh, test_mesh, verbose=True)
+        draw_heatmap(test_mesh, ref_mesh, verbose=True)
+
         
         colored_tooth, max_dist = draw_heatmap(ref_mesh, test_mesh, return_max=True)
 
@@ -57,7 +63,7 @@ def pair_heights(
 
 def patient_heights(root: Path, patient: str, verbose: bool=False):
     df = pd.DataFrame({'FDI': fdis})
-    for path in sorted(root.glob(f'{patient}/*')):
+    for path in sorted(root.glob(f'{patient}/*'))[::-1]:
         if path.is_file():
             continue
 
@@ -89,10 +95,10 @@ def patient_heights(root: Path, patient: str, verbose: bool=False):
 
 if __name__ == '__main__':
     root = Path('methodology study')
-    verbose = False
+    verbose = True
 
     dfs = {}
-    for patient in ['A-24', 'A-29', 'A-20', 'A-25', 'A-28', 'A-41', 'A-46', 'A-27']:
+    for patient in ['A-46', 'A-24', 'A-29', 'A-20', 'A-25', 'A-28', 'A-41', 'A-27']:
         print('Patient', patient)
         df = patient_heights(root, patient, verbose=verbose)
         dfs[patient] = df

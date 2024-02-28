@@ -28,8 +28,8 @@ def draw_correspondences(
     test: DentalMesh,
 ) -> None:
     centroids = np.concatenate((
-        np.stack(reference.centroids.values()) - reference.centroid,
-        np.stack(test.centroids.values()) - test.centroid,
+        np.stack(list(reference.centroids.values())) - reference.centroid,
+        np.stack(list(test.centroids.values())) - test.centroid,
     ))
     o3d_pcd = open3d.geometry.PointCloud(
         points=open3d.utility.Vector3dVector(centroids),
@@ -116,24 +116,30 @@ def draw_heatmap(
     mask: Optional[NDArray[np.bool_]]=None,
     verbose: bool=False,
     return_max: bool=False,
-) -> open3d.geometry.TriangleMesh:
-    distances = reference.signed_distances(test)
+) -> Union[
+    open3d.geometry.TriangleMesh,
+    Tuple[open3d.geometry.TriangleMesh, dict]
+]:
+    distances = reference.signed_distances(test, ignore_border=False)
     colors = distances_to_colors(distances)
 
     if mask is not None:
         reference = reference[mask]
         colors = colors[mask]
 
-    reference = reference.to_open3d_triangle_mesh()
-    reference.vertex_colors = open3d.utility.Vector3dVector(colors)
+    out = reference.to_open3d_triangle_mesh()
+    out.vertex_colors = open3d.utility.Vector3dVector(colors)
 
     if verbose:
-        open3d.visualization.draw_geometries([reference])
+        open3d.visualization.draw_geometries([out])
     
     if return_max:
-        return reference, np.nanmin(distances)
+        distances = reference.signed_distances(test)
+        distances = distances[~np.isnan(distances)]
+        wear = {'max': np.min(distances), 'mad': np.mean(np.abs(distances - np.mean(distances)))}
+        return out, wear
 
-    return reference
+    return out
 
 
 
