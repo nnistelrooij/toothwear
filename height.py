@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Dict, Tuple
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -109,17 +110,17 @@ def patient_heights(
     verbose: bool=False,
 ):
     files = sorted(root.glob(f'{patient}*'))
-    years = [f.name.split('_')[1][0] for f in files]
-    followups = set([year for year in years if year != '0'])
+    times = [f.name.split('_')[1] for f in files]
+    followups = set([time for time in times if time[0] != '0'])
 
     df = pd.DataFrame({'FDI': fdis})
     for followup in sorted(followups):
         wears = {}
         for arch in ['mandible', 'maxilla']:
             tooth_pairs, arch_wears = main(
-                root=root,
-                reference_stem=f'{patient}_0y_{arch}',
-                test_stem=f'{patient}_{followup}y_{arch}',
+                root=root.parent,
+                reference_stem=f'{patient}_{times[0]}_{arch}',
+                test_stem=f'{patient}_{followup}_{arch}',
                 verbose=False,
             )
 
@@ -128,7 +129,7 @@ def patient_heights(
             wears.update(arch_wears)
         
         # save most negative distance of each tooth
-        df[f'0-{followup}'] = [wears.get(fdi, '') for fdi in fdis]
+        df[f'{times[0]}-{followup}'] = [wears.get(fdi, {'max': np.nan})['max'] for fdi in fdis]
 
     return df
 
@@ -138,13 +139,14 @@ if __name__ == '__main__':
     verbose = False
 
     dfs = {}
-    for patient in ['A20', 'A24', 'A29', 'A25', 'A28', 'A46', 'A41', 'A-27']:
+    # for patient in ['A20', 'A24', 'A29', 'A25', 'A28', 'A46', 'A41', 'A-27']:
+    for patient in ['A-17', 'A-26']:
         print('Patient', patient)
-        df = patient_heights(root / 'labels', patient, verbose)
+        df = patient_heights(root / 'AI labels', patient, verbose)
 
         patient = f'{patient[0]}-{patient[1:]}' if '-' not in patient else patient
         dfs[patient] = df
 
-    with pd.ExcelWriter(root / 'ours_heights.xlsx') as writer:
+    with pd.ExcelWriter(root / 'ours_heights_intra.xlsx') as writer:
         for patient, df in dfs.items():
             df.to_excel(writer, sheet_name=patient, index=False)

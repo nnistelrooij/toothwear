@@ -368,6 +368,12 @@ class DentalMesh:
         vertex_mask[border_vertices] = True
         nohit[nohit] = vertex_mask
 
+        # remove points from triangles with too fast changes
+        triangle_mask = closest_points['signed_distances'][self.triangles].ptp(1) < 1.0
+        vertex_mask = np.ones(self.vertices.shape[0], dtype=bool)
+        vertex_mask[self.triangles[~triangle_mask]] = False
+        nohit = nohit | ~vertex_mask
+
         closest_points['points'] = closest_points['points'].astype(np.float64)
         closest_points['points'][nohit] = np.nan
         closest_points['geometry_ids'][nohit] = -1

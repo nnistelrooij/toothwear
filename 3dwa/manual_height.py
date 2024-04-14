@@ -30,16 +30,13 @@ def pair_heights(
         if ref_file.name[0] == 'm':
             continue
 
-        if '21' not in ref_file.name:
-            continue
-
         ref_mesh = DentalMesh.from_files(ref_file, reference=True)
         test_mesh = DentalMesh.from_files(test_file, reference=False)
 
 
 
-        draw_heatmap(ref_mesh, test_mesh, verbose=True)
-        draw_heatmap(test_mesh, ref_mesh, verbose=True)
+        draw_heatmap(ref_mesh, test_mesh, verbose=False)
+        draw_heatmap(test_mesh, ref_mesh, verbose=False)
 
         
         colored_tooth, max_dist = draw_heatmap(ref_mesh, test_mesh, return_max=True)
@@ -68,6 +65,8 @@ def patient_heights(root: Path, patient: str, verbose: bool=False):
             continue
 
         intake, followup = path.name.split('-')
+        if 'operator' in followup:
+            followup = followup.split('_')[0]
         intake_files = sorted(path.glob(f'*{intake}.stl'))
         followup_files = sorted(path.glob(f'*{followup}.stl'))
 
@@ -88,21 +87,24 @@ def patient_heights(root: Path, patient: str, verbose: bool=False):
 
         # save most negative distance of each tooth
         col_name = f'0-{int(followup) - int(intake)}'
-        df[col_name] = [max_heights.get(fdi, '') for fdi in fdis]
+        if 'operator' in path.name:
+            col_name += '_' + path.name.split('_')[1]
+        df[col_name] = [max_heights.get(fdi, {'max': ''})['max'] for fdi in fdis]
 
     return df
 
 
 if __name__ == '__main__':
-    root = Path('methodology study')
-    verbose = True
+    root = Path('methodology study/3DWA pairs')
+    verbose = False
 
     dfs = {}
-    for patient in ['A-46', 'A-24', 'A-29', 'A-20', 'A-25', 'A-28', 'A-41', 'A-27']:
+    # for patient in ['A-46', 'A-24', 'A-29', 'A-20', 'A-25', 'A-28', 'A-41', 'A-27']:
+    for patient in ['A-02', 'A-20', 'A-40', 'A-47']:
         print('Patient', patient)
         df = patient_heights(root, patient, verbose=verbose)
         dfs[patient] = df
 
-    with pd.ExcelWriter(root / '3dwa_heights.xlsx') as writer:
+    with pd.ExcelWriter(root / '3dwa_heights_double.xlsx') as writer:
         for patient, df in dfs.items():
             df.to_excel(writer, sheet_name=patient, index=False)
