@@ -6,13 +6,18 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import ConfusionMatrixDisplay
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    RocCurveDisplay,
+)
 
 
 def draw_confusion_matrix(
     cm,
     labels,
     ax,
+    title: str='',
+    xaxis: bool=True,
     yaxis: bool=True,
     colorbar: bool=True,
 ):
@@ -20,6 +25,8 @@ def draw_confusion_matrix(
     disp = ConfusionMatrixDisplay(norm_cm, display_labels=labels)
     disp.plot(cmap='magma', ax=ax, colorbar=colorbar)
 
+    if not xaxis:
+        disp.ax_.xaxis.set_visible(False)
     if not yaxis:
         disp.ax_.yaxis.set_visible(False)
     
@@ -40,6 +47,8 @@ def draw_confusion_matrix(
 
     ax.set_ylabel('3DWA protocol')
     ax.set_xlabel('Automated method')
+    if title:
+        ax.set_title(title)
 
 
 def extract_heights(
@@ -69,7 +78,7 @@ def extract_heights(
 def apriori_exclusions(
     df_exclusions: pd.DataFrame,
     dfs: Dict[str, pd.DataFrame],
-    patients: List[str]=['A-20', 'A-24', 'A-25', 'A-27', 'A-28', 'A-29', 'A-41', 'A-46'],
+    patients: List[str]=['A-02', 'A-20', 'A-24', 'A-25', 'A-27', 'A-28', 'A-29', 'A-40', 'A-41', 'A-46', 'a-47'],
 ):
     heights = df_exclusions['max. height loss (mm) Geomagic original']
     is_excluded = (heights < 0).to_numpy()
@@ -140,6 +149,7 @@ def direct_confusion_matrices(
     verbose: bool=False,
 ):
     out = np.zeros((32, 3, thresholds.shape[0], thresholds.shape[0]), dtype=int)
+    gts, scores = np.zeros((2, 0))
     for patient in df_3dwa:
         for i, fdi in enumerate(df_3dwa[patient]['FDI']):
             for j, interval in enumerate(df_3dwa[patient].columns[1:]):
@@ -154,8 +164,34 @@ def direct_confusion_matrices(
 
                 gt_label = thresholds.shape[0] - 1 - (thresholds[::-1] <= np.abs(gt_wear.item())).argmax()
                 pred_label = thresholds.shape[0] - 1 - (thresholds[::-1] <= np.abs(pred_wear.item())).argmax()
+                score = np.abs(pred_wear.item())
 
                 out[i, j, gt_label, pred_label] += 1
+                gts = np.concatenate((gts, [gt_label]))
+                scores = np.concatenate((scores, [score]))
+
+    RocCurveDisplay.from_predictions(gts, scores)
+    plt.show()
+
+    thresholds = np.concatenate(([0], scores))
+    f1s = []
+    for thr in thresholds:
+        pred = scores >= thr
+        tp = (gts * pred).sum()
+        fp = ((1 - gts) * pred).sum()
+        fn = (gts * ~pred).sum()
+        tn = ((1 - gts) * ~pred).sum()
+        f1 = 2 * tp / (2 * tp + fp + fn)
+        acc = (tp + tn) / (tp + tn + fp + fn)
+        f1s.append(acc)
+
+    f1s = np.array(f1s)
+    thr = thresholds[np.argmax(f1s)]
+    print(thr)
+
+    ConfusionMatrixDisplay.from_predictions(gts, scores >= thr)
+    plt.show()
+
 
     for i, interval in enumerate(['0-1 years', '0-3 years', '0-5 years']):
         draw_confusion_matrix(
@@ -165,7 +201,6 @@ def direct_confusion_matrices(
             yaxis=i == 0,
             colorbar=False,
         )
-        plt.title(interval)
         plt.savefig(f'figures/cm_{interval}', dpi=500, bbox_inches='tight', pad_inches=None)
         if verbose: plt.show()
         plt.close()
@@ -249,18 +284,28 @@ def analysis_metrics(cms, verbose: bool=False):
     molar_mask[[5, 6, 13, 14, 21, 22, 29, 30]] = True
     teeth_cms[4] = cms[molar_mask].sum(0)
 
-    for i, tooth in enumerate(['Central Incisor', 'Lateral Incisor', 'Canine', 'Premolar', 'Molar']):
-        draw_confusion_matrix(
-            cm=teeth_cms[i].sum(0),
-            labels=['Without lesion', 'With lesion'],
-            ax=plt.gca(),
-            yaxis=i == 0,
-            colorbar=i == 4,
-        )
-        plt.title(tooth)
-        plt.savefig(f'figures/cm_{tooth}', dpi=500, bbox_inches='tight', pad_inches=None)
-        if verbose: plt.show()
-        plt.close()
+    teeth = ['Central Incisor', 'Lateral Incisor', 'Canine', 'Premolar', 'Molar', 'Total']
+    intervals = ['0-1 years', '0-3 years', '0-5 years', 'Total']
+
+    _, axs = plt.subplots(len(teeth), len(intervals), figsize=(12, 16))
+    for i, tooth in enumerate(teeth):
+        for j, interval in enumerate(intervals):
+            tooth_cms = teeth_cms[i] if tooth != 'Total' else teeth_cms.sum(0)
+            cm = tooth_cms[j] if interval != 'Total' else tooth_cms.sum(0)
+
+            draw_confusion_matrix(
+                cm=cm,
+                labels=['Without lesion', 'With lesion'],
+                ax=axs[i][j],
+                title=f'{tooth} - {interval}',
+                xaxis=i == len(teeth) - 1,
+                yaxis=j == 0,
+                colorbar=j == len(intervals) - 1,
+            )
+    plt.tight_layout()
+    plt.savefig(f'figures/cms_table.png', dpi=500, bbox_inches='tight', pad_inches=None)
+    if verbose: plt.show()
+    plt.close()
 
     for metric_name in ['f1', 'prec', 'sens', 'spec', 'acc']:
         f1s = np.zeros((6, 4))
