@@ -38,6 +38,7 @@ For inquiries about this project, please contact [Niels.vanNistelrooij at radbou
 
 ## Cite
 
+```
 @article{toothwear,
   title={Automated monitoring of tooth wear progression using AI on intra-oral scans},
   journal={Journal of Dentistry},
@@ -47,3 +48,4 @@ For inquiries about this project, please contact [Niels.vanNistelrooij at radbou
   doi={10.1016/j.jdent.2024.105323},
   author={Niels {van Nistelrooij} and Eva Maier and Hilde Bronkhorst and Luuk Crins and Tong Xi and Bas A.C. Loomans and Shankeeth Vinayahalingam}
 }
+```
