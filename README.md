@@ -35,3 +35,15 @@ The file `binary_stats.py` can be run to evaluate the automated method compared 
 ## Queries
 
 For inquiries about this project, please contact [Niels.vanNistelrooij at radboudumc.nl](mailto:niels.vannistelrooij@radboudumc.nl).
+
+## Cite
+
+@article{toothwear,
+  title={Automated monitoring of tooth wear progression using AI on intra-oral scans},
+  journal={Journal of Dentistry},
+  pages={105323},
+  year={2024},
+  month={08},
+  doi={10.1016/j.jdent.2024.105323},
+  author={Niels {van Nistelrooij} and Eva Maier and Hilde Bronkhorst and Luuk Crins and Tong Xi and Bas A.C. Loomans and Shankeeth Vinayahalingam}
+}
